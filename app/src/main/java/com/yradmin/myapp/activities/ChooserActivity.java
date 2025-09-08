@@ -1,0 +1,245 @@
+package com.yradmin.myapp.activities;
+
+import android.app.Activity;
+import android.content.BroadcastReceiver;
+import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
+import android.os.Build;
+import android.os.Bundle;
+import android.telephony.SmsManager;
+import android.util.Log;
+import android.util.SparseBooleanArray;
+import android.view.ViewGroup;
+import android.widget.Button;
+
+import androidx.activity.EdgeToEdge;
+import androidx.appcompat.app.AppCompatActivity;
+import androidx.core.content.ContextCompat;
+import androidx.core.graphics.Insets;
+import androidx.core.view.ViewCompat;
+import androidx.core.view.WindowInsetsCompat;
+import androidx.recyclerview.widget.LinearLayoutManager;
+import androidx.recyclerview.widget.RecyclerView;
+
+import com.google.android.material.appbar.MaterialToolbar;
+import com.google.android.material.dialog.MaterialAlertDialogBuilder;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+
+import com.yradmin.myapp.R;
+import com.yradmin.myapp.adapters.ListAdapter;
+import com.yradmin.myapp.data.DataLoader;
+import com.yradmin.myapp.data.Message;
+import com.yradmin.myapp.dialog.ProgressDialog;
+import com.yradmin.myapp.services.MessageService;
+import com.yradmin.myapp.services.SMSSender;
+import com.yradmin.myapp.util.FileUtil;
+import com.yradmin.myapp.util.TextParser;
+import com.yradmin.myapp.util.ToastUtil;
+
+public class ChooserActivity extends AppCompatActivity {
+    private static final String TAG = "ChooserActivity";
+    private RecyclerView mRv;
+    private Button mSend;
+    private ProgressDialog pro;
+    private BroadcastReceiver receiver;
+    private MaterialToolbar topAppBar;
+
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        EdgeToEdge.enable(this);
+        super.onCreate(savedInstanceState);
+        setContentView(R.layout.activity_chooser);
+
+        mRv = findViewById(R.id.rv_data);
+        mSend = findViewById(R.id.btn_send);
+        topAppBar = findViewById(R.id.topAppBar);
+        registerReceiver();
+
+        final RecyclerView.LayoutManager manager = new LinearLayoutManager(this);
+        mRv.setLayoutManager(manager);
+        final ListAdapter adapter = new ListAdapter(this);
+        mRv.setAdapter(adapter);
+
+        mSend.setOnClickListener(v -> {
+            //发送消息
+            ArrayList<Integer> itemIndices = new ArrayList<>();
+            SparseBooleanArray checkedMap = adapter.getCheckedMap();
+//                int max_limit = DataLoader.getMaxLimit();
+            //获取选中项目索引
+            for (int i = 0; i < adapter.getItemCount(); i++) {
+                if (checkedMap.get(i)) {
+                    itemIndices.add(i);
+                }
+            }
+
+            if (itemIndices.isEmpty()) {
+                ToastUtil.show(ChooserActivity.this, "当前还未选择任何收件人哦~");
+                return;
+            }
+
+
+            pro = new ProgressDialog(ChooserActivity.this, itemIndices.size());
+            runOnUiThread(()->{
+                pro.show();
+            });
+
+            String rawContent = DataLoader.getContent();
+            String numberCol = DataLoader.getNumberColumn();
+
+            // generate messages
+            List<Message> messages = new ArrayList<>();
+            for (int i = 0; i < itemIndices.size(); i++) {
+                Map<String, String> tmp = DataLoader.getDataModel().getMap(itemIndices.get(i));
+                String content = TextParser.parse(rawContent, tmp);
+                String phoneNumber = tmp.get(numberCol);
+                messages.add(new Message(phoneNumber, content));
+            }
+
+            // write to file
+            String serPath = FileUtil.saveMessageArrayToFile(this, messages.toArray(new Message[0]));
+            if (serPath == null) {
+                ToastUtil.show(ChooserActivity.this, "短信服务启动失败");
+                return;
+            }
+
+            Intent serviceIntent = new Intent(this, MessageService.class);
+            serviceIntent.putExtra("delay", DataLoader.getDelay());  // 延迟时间
+            serviceIntent.putExtra("subId", DataLoader.getSimSubId());  // SIM卡ID
+            serviceIntent.putExtra("message_file", serPath);  // 消息文件路径
+
+            ContextCompat.startForegroundService(this, serviceIntent);
+//            Data inputData = new Data.Builder()
+//                    .putInt("delay", DataLoader.getDelay())
+//                    .putInt("subId", DataLoader.getSimSubId())
+//                    .putString("message_file", serPath)
+//                    .build();
+
+//            OneTimeWorkRequest messageWorkRequest = new OneTimeWorkRequest.Builder(MessageService.class)
+//                    .setInputData(inputData).addTag(Config.SEND_WORKER_TAG)
+//                    .build();
+//            WorkManager.getInstance(ChooserActivity.this).enqueue(messageWorkRequest);
+//                } else {
+//                    ToastUtil.show(ChooserActivity.this, "超出了最大人数限制" + max_limit + "了哦~");
+//                }
+
+        });
+
+
+        topAppBar.setOnMenuItemClickListener(item -> {
+            switch (item.getItemId()) {
+                case R.id.select_all:
+                    if ("全选".contentEquals(item.getTitle())) {
+                        adapter.setAllCheckBoxChosen(true);
+                        item.setTitle("取消全选");
+                    } else {
+                        adapter.setAllCheckBoxChosen(false);
+                        item.setTitle("全选");
+                    }
+                    return true;
+            }
+            return false;
+        });
+
+        topAppBar.setNavigationOnClickListener(v -> finish());
+
+        ViewCompat.setOnApplyWindowInsetsListener(mSend, (v, windowInsets) -> {
+            Insets insets = windowInsets.getInsets(WindowInsetsCompat.Type.systemBars());
+            // Apply the insets as a margin to the view. This solution sets only the
+            // bottom, left, and right dimensions, but you can apply whichever insets are
+            // appropriate to your layout. You can also update the view padding if that's
+            // more appropriate.
+            ViewGroup.MarginLayoutParams mlp = (ViewGroup.MarginLayoutParams) v.getLayoutParams();
+            mlp.leftMargin = insets.left;
+            mlp.bottomMargin = insets.bottom;
+            mlp.rightMargin = insets.right;
+            v.setLayoutParams(mlp);
+
+            // Return CONSUMED if you don't want want the window insets to keep passing
+            // down to descendant views.
+            return WindowInsetsCompat.CONSUMED;
+        });
+
+        //选择号码列
+        MaterialAlertDialogBuilder dialogBuilder = new MaterialAlertDialogBuilder(this);
+        dialogBuilder.setTitle("哪列存储着号码？")
+                .setItems(DataLoader.getTitles(), (dialog, which) -> {
+                    DataLoader.setNumberColumn(DataLoader.getTitles()[which]);
+                    ToastUtil.show(this, "号码列: " + DataLoader.getTitles()[which]);
+                    dialog.dismiss();
+                }).setCancelable(false).show();
+
+    }
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        Log.d(TAG, "onDestroy: ");
+        unRegisterReceiver();
+        stopService(new Intent(this, MessageService.class));
+    }
+
+    @Override
+    protected void onStop() {
+        super.onStop();
+        Log.d(TAG, "onStop: ");
+
+    }
+
+    private void unRegisterReceiver(){
+        unregisterReceiver(receiver);
+    }
+
+    private void registerReceiver() {
+        IntentFilter filter = new IntentFilter(SMSSender.SENT_SMS_ACTION);
+        BroadcastReceiver receiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                int code = intent.getIntExtra("code", -1);
+                int resultCode = getResultCode();
+                switch (resultCode) {
+                    case Activity.RESULT_OK:
+                        Log.d(TAG, "onReceive: 第" + code + "条 发送成功");
+                        pro.appendMsg("第" + code + "条 发送成功\n");
+                        pro.update(code);
+                        break;
+                    case SmsManager.RESULT_ERROR_GENERIC_FAILURE:
+
+                    case SmsManager.RESULT_ERROR_RADIO_OFF:
+
+                    case SmsManager.RESULT_ERROR_NULL_PDU:
+                    default:
+                        Log.d(TAG, "onReceive: 第" + code + "条 发送失败: " + resultCode);
+                        pro.appendMsg("第" + code + "条 发送失败\n");
+                        pro.update(code);
+                        break;
+                }
+            }
+        };
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(receiver, filter, RECEIVER_EXPORTED);
+        } else {
+            registerReceiver(receiver, filter);
+        }
+        this.receiver = receiver;
+
+
+        //test
+//        filter = new IntentFilter(MessageService.TEST);
+//        registerReceiver(new BroadcastReceiver() {
+//            @Override
+//            public void onReceive(Context context, Intent intent) {
+//                int code = intent.getIntExtra("code", -1);
+//                String content = intent.getStringExtra("content");
+//                String number = intent.getStringExtra("number");
+//                pro.update(code);
+//                pro.appendMsg("第" + code + "条 发送成功\n");
+//                Log.d("msgD", "code= " + code + " content= " + content + " number= " + number);
+//            }
+//        }, filter);
+    }
+}
